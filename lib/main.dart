@@ -9,7 +9,7 @@ void main() async {
 
   await Supabase.initialize(
     url: SupabaseConfig.supabaseUrl,
-    anonKey: SupabaseConfig.supabaseKey,
+    publishableKey: SupabaseConfig.supabaseKey,
   );
 
   runApp(const LightFarmApp());
