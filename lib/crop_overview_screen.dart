@@ -31,6 +31,10 @@ class _CropOverviewScreenState extends State<CropOverviewScreen>{
   //grouped: crop name (or 'Not decided') → list of farmer profiles
   Map<String, List<Map<String, dynamic>>> _groups = {};
 
+  // admin supply/demand data (from RPC + crop_demand table)
+  Map<String, double> _supply = {};   // crop → production tons (from get_crop_totals)
+  Map<String, double> _demand = {};   // crop → expected_demand tons
+
   @override
   void initState(){
     super.initState();
@@ -66,9 +70,23 @@ class _CropOverviewScreenState extends State<CropOverviewScreen>{
       groups[key]!.add(f);
     }
 
+    // admin-only: fetch supply (via RPC) and demand in parallel
+    Map<String, double> supply = {};
+    Map<String, double> demand = {};
+    if(role == 'admin'){
+      final results = await Future.wait([
+        widget.farmService.getCropTotals(),
+        widget.farmService.getCropDemand(),
+      ]);
+      supply = results[0] as Map<String, double>;
+      demand = results[1] as Map<String, double>;
+    }
+
     if(!mounted) return;
     setState((){
       _groups   = groups;
+      _supply   = supply;
+      _demand   = demand;
       _isLoading = false;
     });
   }
@@ -85,6 +103,12 @@ class _CropOverviewScreenState extends State<CropOverviewScreen>{
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                //── admin supply/demand/gap table ─────────────
+                if(role == 'admin') ...[
+                  _supplyDemandTable(),
+                  const SizedBox(height: 20),
+                ],
+
                 //── known crops ──────────────────────────
                 for(final crop in kCropList) _cropSection(crop, role),
 
@@ -94,6 +118,83 @@ class _CropOverviewScreenState extends State<CropOverviewScreen>{
             ),
     );
   }
+
+  // ── Supply / Demand / Gap table (admin only) ──────────────
+  Widget _supplyDemandTable(){
+    // header + one row per crop
+    const headerStyle = TextStyle(fontWeight: FontWeight.bold, fontSize: 13);
+    const cellStyle   = TextStyle(fontSize: 13);
+
+    TableRow headerRow = TableRow(
+      decoration: BoxDecoration(color: Colors.grey.shade200),
+      children: [
+        _cell('Crop',    headerStyle),
+        _cell('Supply',  headerStyle, align: TextAlign.right),
+        _cell('Demand',  headerStyle, align: TextAlign.right),
+        _cell('Gap',     headerStyle, align: TextAlign.right),
+      ],
+    );
+
+    final dataRows = kCropList.map((crop){
+      final supply = _supply[crop] ?? 0.0;
+      final demand = _demand[crop] ?? 0.0;
+      final gap    = demand - supply;
+
+      // positive gap = shortage (red), negative = surplus (green)
+      final gapColor = gap > 0 ? Colors.red.shade700 : Colors.green.shade700;
+      final gapText  = '${gap >= 0 ? '+' : ''}${gap.toStringAsFixed(1)}';
+      final cropName = crop[0].toUpperCase() + crop.substring(1);
+
+      return TableRow(children: [
+        _cell(cropName,                          cellStyle),
+        _cell('${supply.toStringAsFixed(1)} t',  cellStyle, align: TextAlign.right),
+        _cell('${demand.toStringAsFixed(1)} t',  cellStyle, align: TextAlign.right),
+        _cell(gapText,  cellStyle.copyWith(color: gapColor, fontWeight: FontWeight.w600),
+              align: TextAlign.right),
+      ]);
+    }).toList();
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Supply / Demand / Gap',
+              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Gap = Demand − Supply  ·  + shortage  ·  − surplus',
+              style: TextStyle(fontSize: 11, color: Colors.grey),
+            ),
+            const SizedBox(height: 10),
+            Table(
+              columnWidths: const {
+                0: FlexColumnWidth(2),
+                1: FlexColumnWidth(2),
+                2: FlexColumnWidth(2),
+                3: FlexColumnWidth(2),
+              },
+              border: TableBorder.all(color: Colors.grey.shade300, width: 0.8),
+              children: [headerRow, ...dataRows],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _cell(String text, TextStyle style,
+      {TextAlign align = TextAlign.left}) =>
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Text(text, style: style, textAlign: align),
+      );
+
+  // ─────────────────────────────────────────────────────────
 
   Widget _cropSection(String crop, String role){
     final farmers  = _groups[crop] ?? [];

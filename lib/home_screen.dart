@@ -25,6 +25,9 @@ class _HomeScreenState extends State<HomeScreen>{
   List<Map<String, dynamic>> _farmers = [];
   bool _isLoading = true;
 
+  // ── farmer recommendation state ──────────
+  String? _recommendedCrop;   // null = no suitable crops
+
   @override
   void initState(){
     super.initState();
@@ -36,11 +39,46 @@ class _HomeScreenState extends State<HomeScreen>{
     if(profile?['role'] == 'local_gov' && profile?['location'] != null){
       _farmers = await _farmService.getFarmersInRegion(profile!['location']);
     }
+
+    String? recommended;
+    if(profile?['role'] == 'farmer'){
+      recommended = await _loadRecommendation(profile!);
+    }
+
     if(!mounted) return;
     setState((){
       _profile = profile;
+      _recommendedCrop = recommended;
       _isLoading = false;
     });
+  }
+
+  /// Computes the max-gap crop recommendation for a farmer.
+  Future<String?> _loadRecommendation(Map<String, dynamic> profile) async{
+    final suitable = _toList(profile['suitable_crops']);
+    if(suitable.isEmpty) return null;
+
+    // fetch in parallel
+    final results = await Future.wait([
+      _farmService.getCropTotals(),
+      _farmService.getCropDemand(),
+    ]);
+    final totals = results[0] as Map<String, double>;
+    final demand = results[1] as Map<String, double>;
+
+    // find crop with max gap (expected_demand − production)
+    String? best;
+    double bestGap = double.negativeInfinity;
+    for(final crop in suitable){
+      final production    = totals[crop] ?? 0.0;
+      final expectedDemand = demand[crop] ?? 0.0;
+      final gap = expectedDemand - production;
+      if(gap > bestGap){
+        bestGap = gap;
+        best    = crop;
+      }
+    }
+    return best;
   }
 
   Future<void> _logout() async{
@@ -104,6 +142,35 @@ class _HomeScreenState extends State<HomeScreen>{
           label: Text(planning ?? 'Not decided'),
           backgroundColor: planning == null ? Colors.grey.shade200 : null,
         ),
+
+        // ── Recommendation banner ─────────────────────────────
+        // Only shown when: suitable crops selected AND not yet decided
+        if(suitable.isNotEmpty && planning == null && _recommendedCrop != null) ...[
+          const SizedBox(height: 20),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.green.shade50,
+              border: Border.all(color: Colors.green.shade300),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.eco, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  'Recommended: ${_recommendedCrop![0].toUpperCase()}${_recommendedCrop!.substring(1)}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Colors.green,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        // ─────────────────────────────────────────────────────
 
         const SizedBox(height: 28),
         ElevatedButton.icon(
@@ -173,6 +240,11 @@ class _HomeScreenState extends State<HomeScreen>{
           icon: const Icon(Icons.bar_chart),
           label: const Text('Crop Overview (All Regions)'),
         ),
+        const SizedBox(height: 24),
+        const Text('Manage Crop Demand',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        _CropDemandForm(farmService: _farmService),
       ],
     );
   }
@@ -208,6 +280,104 @@ class _HomeScreenState extends State<HomeScreen>{
           ],
         ),
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────
+// Admin: crop demand form
+// ─────────────────────────────────────────
+class _CropDemandForm extends StatefulWidget{
+  final FarmService farmService;
+  const _CropDemandForm({required this.farmService});
+
+  @override
+  State<_CropDemandForm> createState() => _CropDemandFormState();
+}
+
+class _CropDemandFormState extends State<_CropDemandForm>{
+  final Map<String, TextEditingController> _controllers = {
+    for(final c in kCropList) c: TextEditingController(),
+  };
+  bool _loading = true;
+  bool _saving  = false;
+
+  @override
+  void initState(){
+    super.initState();
+    _loadDemand();
+  }
+
+  @override
+  void dispose(){
+    for(final c in _controllers.values) c.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadDemand() async{
+    final demand = await widget.farmService.getCropDemand();
+    for(final crop in kCropList){
+      _controllers[crop]!.text = (demand[crop] ?? 0).toStringAsFixed(0);
+    }
+    if(!mounted) return;
+    setState(() => _loading = false);
+  }
+
+  Future<void> _save() async{
+    setState(() => _saving = true);
+    try{
+      for(final crop in kCropList){
+        final val = double.tryParse(_controllers[crop]!.text.trim()) ?? 0;
+        await widget.farmService.upsertCropDemand(crop, val);
+      }
+      if(!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Demand updated')),
+      );
+    }catch(e){
+      if(!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    }finally{
+      if(mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context){
+    if(_loading) return const CircularProgressIndicator();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for(final crop in kCropList) ...[
+          Text(
+            '${crop[0].toUpperCase()}${crop.substring(1)} expected demand (tons)',
+            style: const TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 4),
+          TextField(
+            controller: _controllers[crop],
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(
+              border: const OutlineInputBorder(),
+              isDense: true,
+              hintText: '0',
+              suffixText: 'tons',
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        ElevatedButton(
+          onPressed: _saving ? null : _save,
+          child: _saving
+              ? const SizedBox(
+                  height: 18, width: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Save Demand'),
+        ),
+      ],
     );
   }
 }
